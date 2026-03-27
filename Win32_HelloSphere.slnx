@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Win32_HelloSphere/Win32_HelloSphere.vcxproj" Id="b15918ee-fc8d-475b-9544-538b34d032a7" />
+</Solution>
