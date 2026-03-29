@@ -14,10 +14,6 @@
 #include "app_state.h"
 #include "ui.h"
 
-
-static double gCursorScale;
-static GLuint gCursorDisplayList = 0;
-
 float clamp01(float v)
 {
 	if (v < 0.0f) return 0.0f;
@@ -53,6 +49,7 @@ void drawScaledText(float x, float y, float scale, const char* text)
 	while (*text)
 	{
 		glutStrokeCharacter(GLUT_STROKE_ROMAN, *text);
+		++text;
 	}
 
 	glPopMatrix();

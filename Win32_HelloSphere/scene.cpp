@@ -27,11 +27,11 @@
 
 
 /* Haptic device and rendering context handles. */
-static HHD ghHD = HD_INVALID_HANDLE; //햅틱 디바이스 핸들. 초기에는 invalid로 설정
-static HHLRC ghHLRC = 0; //햅틱 디바이스 컨텍스트
+HHD ghHD = HD_INVALID_HANDLE; //햅틱 디바이스 핸들. 초기에는 invalid로 설정
+HHLRC ghHLRC = 0; //햅틱 디바이스 컨텍스트
 
 /* Shape id for shape we will render haptically. */
-HLuint gSphereShapeId;
+HLuint gShapeId;
 
 /*cursor*/
 double gCursorScale = 1.0;
@@ -46,6 +46,21 @@ float gDynamicFriction = 0.3f;
 /* Window size */
 int gWindowWidth = 1280;
 int gWindowHeight = 1080;
+
+/* 그랩 인터랙션 */
+GrabObjectState gGrabObj =
+{
+	false, false,
+	hduVector3Dd(0.0, 0.0, 0.0), // position
+	hduVector3Dd(0.0, 0.0, 0.0), // velocity
+	hduVector3Dd(0.0, 0.0, 0.0), // targetPosition
+	hduVector3Dd(0.0, 0.0, 0.0), // grabOffset
+	1.0,   // mass
+	18.0,  // springK
+	7.0    // dampingC
+};
+
+bool gUseVirtualCoupling = false;
 
 /* Propety Control Buttons*/
 UIButton gButtons[] =
@@ -62,6 +77,170 @@ UIButton gButtons[] =
 
 const int gButtonCount = sizeof(gButtons) / sizeof(gButtons[0]);
 
+
+/* 그랩 인터랙션 헬퍼 함수 */
+static hduVector3Dd getProxyPosition()
+{
+	HLdouble p[3];
+	hlGetDoublev(HL_PROXY_POSITION, p);
+	return hduVector3Dd(p[0], p[1], p[2]);
+}
+
+static double degToRad(double deg)
+{
+	return deg * 3.1415926 / 180.0;
+}
+
+static hduVector3Dd rotateVEctorEulerXYZ(const hduVector3Dd& v, const hduVector3Dd& eulerDeg)
+{
+	double rx = degToRad(eulerDeg[0]);
+	double ry = degToRad(eulerDeg[1]);
+	double rz = degToRad(eulerDeg[2]);
+
+	double cx = cos(rx), sx = sin(rx);
+	hduVector3Dd r1(v[0], cx * v[1] - sx * v[2], sx * v[1] + cx * v[2]);
+
+	double cy = cos(ry), sy = sin(ry);
+	hduVector3Dd r2(cy * r1[0] + sy * r1[2], r1[1], -sy * r1[0] + cy * r1[2]);
+
+	double cz = cos(rz), sz = sin(rz);
+	hduVector3Dd r3(cz * r2[0] - sz * r2[1], sz * r2[0] + cz * r2[1], r2[2]);
+
+	return r3;
+
+}
+
+static void beginGrab(const hduVector3Dd& proxyPos)
+{
+	if (!gGrabObj.isTouched)
+		return;
+
+	gGrabObj.isGrabbed = true;
+
+	// 위치
+	gGrabObj.grabOffset = gGrabObj.position - proxyPos;
+	gGrabObj.targetPosition = gGrabObj.position;
+
+	// 회전
+	gGrabObj.lastProxyPos = proxyPos;
+	gGrabObj.grabLocalPoint = proxyPos - gGrabObj.position;
+	gGrabObj.targetRotationEuler = gGrabObj.rotationEuler;
+}
+
+static void endGrab()
+{
+	gGrabObj.isGrabbed = false;
+}
+
+static void updateGrabTarget(const hduVector3Dd& proxyPos)
+{
+	if (!gGrabObj.isGrabbed)
+		return;
+
+	gGrabObj.targetPosition = proxyPos + gGrabObj.grabOffset;
+}
+
+static void updateGrabRotationTarget(const hduVector3Dd& proxyPos)
+{
+	if (!gGrabObj.isGrabbed)
+		return;
+
+	hduVector3Dd delta = proxyPos - gGrabObj.lastProxyPos;
+	gGrabObj.lastProxyPos = proxyPos;
+
+	//좌우 이동 -> y축 회전
+	//상하 이동 -> x축 회전
+	gGrabObj.targetRotationEuler[1] += delta[0] * gGrabObj.rotationSensitivity;
+	gGrabObj.targetRotationEuler[0] += -delta[1] * gGrabObj.rotationSensitivity;
+}
+
+static void updateObjectMotion(double dt)
+{
+	if (!gGrabObj.isGrabbed)
+		return;
+
+	if (!gUseVirtualCoupling)
+	{
+		//위치
+		gGrabObj.position = gGrabObj.targetPosition;
+		gGrabObj.velocity.set(0.0, 0.0, 0.0);
+
+		//회전
+		gGrabObj.rotationEuler = gGrabObj.targetRotationEuler;
+		gGrabObj.angularVelocity.set(0.0, 0.0, 0.0);
+	}
+	else
+	{
+		//위치 커플링
+		hduVector3Dd x = gGrabObj.position;
+		hduVector3Dd v = gGrabObj.velocity;
+		hduVector3Dd xTarget = gGrabObj.targetPosition;
+
+		hduVector3Dd force = gGrabObj.springK * (xTarget - x) - gGrabObj.dampingC * v;
+
+		hduVector3Dd accel = force / gGrabObj.mass;
+		gGrabObj.velocity += accel * dt;
+		gGrabObj.position += gGrabObj.velocity * dt;
+
+		//회전 커플링
+		hduVector3Dd r = gGrabObj.rotationEuler;
+		hduVector3Dd w = gGrabObj.angularVelocity;
+		hduVector3Dd rTarget = gGrabObj.targetRotationEuler;
+
+		hduVector3Dd torque = gGrabObj.springK * (rTarget - r) - gGrabObj.dampingC * w;
+
+		hduVector3Dd angAccel = torque / gGrabObj.mass;
+		gGrabObj.angularVelocity += angAccel * dt;
+		gGrabObj.rotationEuler += gGrabObj.angularVelocity * dt;
+	}
+
+	//회전된 잡은 점이 게속 proxy 위치에 오도록 중심 재계산
+	hduVector3Dd proxyPos = getProxyPosition();
+	hduVector3Dd rotatedLocalGrabPoint = rotateVEctorEulerXYZ(gGrabObj.grabLocalPoint, gGrabObj.rotationEuler);
+
+	gGrabObj.position = proxyPos - rotatedLocalGrabPoint;
+}
+
+static void drawSharedObjectGeometry()
+{
+	if (hasObjModel())
+		drawObjModel();
+	else
+		glutSolidSphere(0.5, 32, 32);
+}
+
+static void applyObjectTransform()
+{
+	glTranslated(gGrabObj.position[0], gGrabObj.position[1], gGrabObj.position[2]);
+
+	glRotated(gGrabObj.rotationEuler[0], 1.0, 0.0, 0.0);
+	glRotated(gGrabObj.rotationEuler[1], 0.0, 1.0, 0.0);
+	glRotated(gGrabObj.rotationEuler[2], 0.0, 0.0, 1.0);
+}
+
+/* 인터랙션 콜백 */
+void HLCALLBACK buttonDownCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
+{
+	hduVector3Dd proxyPos = getProxyPosition();
+	beginGrab(proxyPos);
+}
+
+void HLCALLBACK buttonUpCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
+{
+	endGrab();
+}
+
+void HLCALLBACK touchCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
+{
+	gGrabObj.isTouched = true;
+}
+
+void HLCALLBACK untouchCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
+{
+	gGrabObj.isTouched = false;
+}
+
+/* 씬 초기화 */
 void initScene()
 {
 	initGL();
@@ -147,9 +326,15 @@ void initHL()
 	hlEnable(HL_HAPTIC_CAMERA_VIEW);
 
 	// 기하에 대한 id 생성
-	gSphereShapeId = hlGenShapes(1);
+	gShapeId = hlGenShapes(1);
 
 	hlTouchableFace(HL_FRONT); //이거 잘 하면 슬라임 같은 느낌 낼 수도 있을 듯? HL_BACK으로 하면?
+
+	//콜백 호출
+	hlAddEventCallback(HL_EVENT_1BUTTONDOWN, gShapeId, HL_CLIENT_THREAD, buttonDownCB, NULL);
+	hlAddEventCallback(HL_EVENT_1BUTTONUP, HL_OBJECT_ANY, HL_CLIENT_THREAD, buttonUpCB, NULL);
+	hlAddEventCallback(HL_EVENT_TOUCH, gShapeId, HL_CLIENT_THREAD, touchCB, NULL);
+	hlAddEventCallback(HL_EVENT_UNTOUCH, gShapeId, HL_CLIENT_THREAD, untouchCB, NULL);
 }
 
 /*햅틱 렌더링 매인 루프 */
@@ -165,14 +350,15 @@ void drawSceneHaptics()
 	hlMaterialf(HL_FRONT_AND_BACK, HL_DYNAMIC_FRICTION, gDynamicFriction);
 
 	// OpenGL 기하를 가져와서 햅틱 렌더링에 쓸 수 있도록 함.
-	hlBeginShape(HL_SHAPE_FEEDBACK_BUFFER, gSphereShapeId);
+	hlBeginShape(HL_SHAPE_FEEDBACK_BUFFER, gShapeId);
 
+	glPushMatrix();
 
-	if (hasObjModel())
-		drawObjModel();
-	else
-		// 기하 생성 위해 opengl 명령어 이용
-		glutSolidSphere(0.5, 32, 32);
+	applyObjectTransform();
+
+	drawSharedObjectGeometry();
+
+	glPopMatrix();
 
 	// End the shape
 	hlEndShape();
@@ -278,14 +464,18 @@ void drawSceneGraphics()
 {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+
+	glColor3f(0.8f, 0.8f, 0.8f);
+
+	applyObjectTransform();
+	drawSharedObjectGeometry();
+
+	glPopMatrix();
+
 	//햅틱 디바이스 포지션으로부터 3d 커서 렌더링
 	drawCursor();
-
-	//지오메트리 그리기
-	if (hasObjModel())
-		drawObjModel();
-	else
-		glutSolidSphere(0.5, 32, 32);
 
 	//속성 텍스트 그리기
 	drawMaterialUI();
@@ -295,7 +485,7 @@ void drawSceneGraphics()
 void exitHandler()
 {
 	// 쉐이프 id 할당 해제
-	hlDeleteShapes(gSphereShapeId, 1); // ram 블록 해제
+	hlDeleteShapes(gShapeId, 1); // ram 블록 해제
 
 	// 햅틱 렌더링 컨텍스트 할당 해제
 	hlMakeCurrent(NULL);
@@ -309,4 +499,28 @@ void exitHandler()
 	{
 		hdDisableDevice(ghHD);
 	}
+}
+
+/* 인터랙션 업데이트 함수 */
+void updateInteraction()
+{
+	static int lastTime = glutGet(GLUT_ELAPSED_TIME);
+	int currentTime = glutGet(GLUT_ELAPSED_TIME);
+	double dt = (currentTime - lastTime) / 1000.0;
+	lastTime = currentTime;
+
+	if (dt <= 0.0)
+		dt = 0.001;
+
+	hduVector3Dd proxyPos = getProxyPosition();
+
+	if (gGrabObj.isGrabbed)
+	{
+		updateGrabTarget(proxyPos);
+		updateGrabRotationTarget(proxyPos);
+	}
+
+	updateObjectMotion(dt);
+
+	hlCheckEvents();
 }

@@ -31,6 +31,10 @@ int main(int argc, char* argv[])
 {
 	glutInit(&argc, argv);
 
+	// GLUT_BOUBLE: 더블 버퍼링을 쓰겠다.
+	// 더블 버퍼링이란, 하나는 보여주고 있는 화면, 다른 하나는 새로 그리는 화면
+	// glutSwapBuffers();를 사용하면 버퍼가 바뀌면서 업데이트 된 화면을 보여줌.
+	// 이걸 쓰는 애유는 깜빡임, 지우고 다시 그리는 과정 노출 등을 줄이기 위함.
 	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
 
 	glutInitWindowSize(gWindowWidth, gWindowHeight);
@@ -60,8 +64,9 @@ int main(int argc, char* argv[])
 /* GLUT redraw 콜백 */
 void glutDisplay()
 {
-	drawSceneHaptics();
+	updateInteraction();
 
+	drawSceneHaptics();
 	drawSceneGraphics();
 
 	glutSwapBuffers();

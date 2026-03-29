@@ -10,3 +10,6 @@ void drawCursor();
 
 void updateWorkspace();
 void exitHandler();
+
+//인터랙션
+void updateInteraction();
