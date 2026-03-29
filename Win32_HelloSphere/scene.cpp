@@ -51,13 +51,9 @@ int gWindowHeight = 1080;
 GrabObjectState gGrabObj =
 {
 	false, false,
-	hduVector3Dd(0.0, 0.0, 0.0), // position
-	hduVector3Dd(0.0, 0.0, 0.0), // velocity
-	hduVector3Dd(0.0, 0.0, 0.0), // targetPosition
-	hduVector3Dd(0.0, 0.0, 0.0), // grabOffset
-	1.0,   // mass
-	18.0,  // springK
-	7.0    // dampingC
+	hduMatrix(),
+	hduMatrix(),
+	hduMatrix()
 };
 
 bool gUseVirtualCoupling = false;
@@ -79,6 +75,23 @@ const int gButtonCount = sizeof(gButtons) / sizeof(gButtons[0]);
 
 
 /* 그랩 인터랙션 헬퍼 함수 */
+
+static hduMatrix getProxyTransform()
+{
+	HLdouble m[16];
+	hlGetDoublev(HL_PROXY_TRANSFORM, m);
+
+	HDdouble mat[4][4] =
+	{
+		{ m[0], m[1], m[2], m[3] },
+		{ m[4], m[5], m[6], m[7] },
+		{ m[8], m[9], m[10], m[11] },
+		{ m[12], m[13], m[14], m[15] }
+	};
+
+	return hduMatrix(mat);
+}
+
 static hduVector3Dd getProxyPosition()
 {
 	HLdouble p[3];
@@ -86,119 +99,21 @@ static hduVector3Dd getProxyPosition()
 	return hduVector3Dd(p[0], p[1], p[2]);
 }
 
-static double degToRad(double deg)
-{
-	return deg * 3.1415926 / 180.0;
-}
-
-static hduVector3Dd rotateVEctorEulerXYZ(const hduVector3Dd& v, const hduVector3Dd& eulerDeg)
-{
-	double rx = degToRad(eulerDeg[0]);
-	double ry = degToRad(eulerDeg[1]);
-	double rz = degToRad(eulerDeg[2]);
-
-	double cx = cos(rx), sx = sin(rx);
-	hduVector3Dd r1(v[0], cx * v[1] - sx * v[2], sx * v[1] + cx * v[2]);
-
-	double cy = cos(ry), sy = sin(ry);
-	hduVector3Dd r2(cy * r1[0] + sy * r1[2], r1[1], -sy * r1[0] + cy * r1[2]);
-
-	double cz = cos(rz), sz = sin(rz);
-	hduVector3Dd r3(cz * r2[0] - sz * r2[1], sz * r2[0] + cz * r2[1], r2[2]);
-
-	return r3;
-
-}
-
-static void beginGrab(const hduVector3Dd& proxyPos)
+static void beginGrab()
 {
 	if (!gGrabObj.isTouched)
 		return;
 
 	gGrabObj.isGrabbed = true;
 
-	// 위치
-	gGrabObj.grabOffset = gGrabObj.position - proxyPos;
-	gGrabObj.targetPosition = gGrabObj.position;
-
-	// 회전
-	gGrabObj.lastProxyPos = proxyPos;
-	gGrabObj.grabLocalPoint = proxyPos - gGrabObj.position;
-	gGrabObj.targetRotationEuler = gGrabObj.rotationEuler;
+	gGrabObj.proxyStartTransfrom = getProxyTransform();
+	gGrabObj.proxyStartPosition = getProxyPosition();
+	gGrabObj.objectStartTransform = gGrabObj.objectTransform;
 }
 
 static void endGrab()
 {
 	gGrabObj.isGrabbed = false;
-}
-
-static void updateGrabTarget(const hduVector3Dd& proxyPos)
-{
-	if (!gGrabObj.isGrabbed)
-		return;
-
-	gGrabObj.targetPosition = proxyPos + gGrabObj.grabOffset;
-}
-
-static void updateGrabRotationTarget(const hduVector3Dd& proxyPos)
-{
-	if (!gGrabObj.isGrabbed)
-		return;
-
-	hduVector3Dd delta = proxyPos - gGrabObj.lastProxyPos;
-	gGrabObj.lastProxyPos = proxyPos;
-
-	//좌우 이동 -> y축 회전
-	//상하 이동 -> x축 회전
-	gGrabObj.targetRotationEuler[1] += delta[0] * gGrabObj.rotationSensitivity;
-	gGrabObj.targetRotationEuler[0] += -delta[1] * gGrabObj.rotationSensitivity;
-}
-
-static void updateObjectMotion(double dt)
-{
-	if (!gGrabObj.isGrabbed)
-		return;
-
-	if (!gUseVirtualCoupling)
-	{
-		//위치
-		gGrabObj.position = gGrabObj.targetPosition;
-		gGrabObj.velocity.set(0.0, 0.0, 0.0);
-
-		//회전
-		gGrabObj.rotationEuler = gGrabObj.targetRotationEuler;
-		gGrabObj.angularVelocity.set(0.0, 0.0, 0.0);
-	}
-	else
-	{
-		//위치 커플링
-		hduVector3Dd x = gGrabObj.position;
-		hduVector3Dd v = gGrabObj.velocity;
-		hduVector3Dd xTarget = gGrabObj.targetPosition;
-
-		hduVector3Dd force = gGrabObj.springK * (xTarget - x) - gGrabObj.dampingC * v;
-
-		hduVector3Dd accel = force / gGrabObj.mass;
-		gGrabObj.velocity += accel * dt;
-		gGrabObj.position += gGrabObj.velocity * dt;
-
-		//회전 커플링
-		hduVector3Dd r = gGrabObj.rotationEuler;
-		hduVector3Dd w = gGrabObj.angularVelocity;
-		hduVector3Dd rTarget = gGrabObj.targetRotationEuler;
-
-		hduVector3Dd torque = gGrabObj.springK * (rTarget - r) - gGrabObj.dampingC * w;
-
-		hduVector3Dd angAccel = torque / gGrabObj.mass;
-		gGrabObj.angularVelocity += angAccel * dt;
-		gGrabObj.rotationEuler += gGrabObj.angularVelocity * dt;
-	}
-
-	//회전된 잡은 점이 게속 proxy 위치에 오도록 중심 재계산
-	hduVector3Dd proxyPos = getProxyPosition();
-	hduVector3Dd rotatedLocalGrabPoint = rotateVEctorEulerXYZ(gGrabObj.grabLocalPoint, gGrabObj.rotationEuler);
-
-	gGrabObj.position = proxyPos - rotatedLocalGrabPoint;
 }
 
 static void drawSharedObjectGeometry()
@@ -211,18 +126,15 @@ static void drawSharedObjectGeometry()
 
 static void applyObjectTransform()
 {
-	glTranslated(gGrabObj.position[0], gGrabObj.position[1], gGrabObj.position[2]);
-
-	glRotated(gGrabObj.rotationEuler[0], 1.0, 0.0, 0.0);
-	glRotated(gGrabObj.rotationEuler[1], 0.0, 1.0, 0.0);
-	glRotated(gGrabObj.rotationEuler[2], 0.0, 0.0, 1.0);
+	HDdouble m[4][4];
+	gGrabObj.objectTransform.get(m);
+	glMultMatrixd((double*)m);
 }
 
 /* 인터랙션 콜백 */
 void HLCALLBACK buttonDownCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
 {
-	hduVector3Dd proxyPos = getProxyPosition();
-	beginGrab(proxyPos);
+	beginGrab();
 }
 
 void HLCALLBACK buttonUpCB(HLenum event, HLuint object, HLenum thread, HLcache* cache, void* userdata)
@@ -504,23 +416,31 @@ void exitHandler()
 /* 인터랙션 업데이트 함수 */
 void updateInteraction()
 {
-	static int lastTime = glutGet(GLUT_ELAPSED_TIME);
-	int currentTime = glutGet(GLUT_ELAPSED_TIME);
-	double dt = (currentTime - lastTime) / 1000.0;
-	lastTime = currentTime;
-
-	if (dt <= 0.0)
-		dt = 0.001;
-
-	hduVector3Dd proxyPos = getProxyPosition();
 
 	if (gGrabObj.isGrabbed)
 	{
-		updateGrabTarget(proxyPos);
-		updateGrabRotationTarget(proxyPos);
-	}
+		hduMatrix proxyNow = getProxyTransform();
+		hduVector3Dd proxyPosNow = getProxyPosition();
 
-	updateObjectMotion(dt);
+		//회전 상대변환
+		hduMatrix rotDelta = proxyNow * gGrabObj.proxyStartTransfrom.getInverse();
+
+		rotDelta[3][0] = 0.0;
+		rotDelta[3][1] = 0.0;
+		rotDelta[3][2] = 0.0;
+
+		//시작 오브젝트 자세에 회전 적용
+		hduMatrix newObject = rotDelta * gGrabObj.objectStartTransform;
+
+		//이동은 월드 기준 위치 차이만 이용
+		hduVector3Dd posDelta = proxyPosNow - gGrabObj.proxyStartPosition;
+
+		newObject[3][0] = gGrabObj.objectStartTransform[3][0] + posDelta[0];
+		newObject[3][1] = gGrabObj.objectStartTransform[3][1] + posDelta[1];
+		newObject[3][2] = gGrabObj.objectStartTransform[3][2] + posDelta[2];
+
+		gGrabObj.objectTransform = newObject;
+	}
 
 	hlCheckEvents();
 }
